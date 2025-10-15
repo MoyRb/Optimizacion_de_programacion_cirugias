@@ -1,3 +1,17 @@
+""""
+- Genoma: permutación de ids de cirugía (sin separadores).
+- Evaluación: reutilizo `decode_permutation_to_schedule` y `fitness` del núcleo.
+- Operadores:
+    * Selección: torneo (k configurable).
+    * Crossover: OX (Order Crossover), conserva bloques y orden relativo.
+    * Mutación: swap + barajar segmento (para explorar localmente).
+- Elitismo: conservo la mejor fracción de la población cada generación.
+
+Justificación:
+- OX funciona muy bien cuando el orden relativo de elementos importa (es nuestro caso).
+- La combinación swap + shuffle da un buen balance entre exploración y explotación.
+"""
+
 # GA.py
 from __future__ import annotations
 from dataclasses import dataclass
