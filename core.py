@@ -1,3 +1,29 @@
+"""
+core.py — Núcleo común (modelo, decodificador y fitness)
+--------------------------------------------------------
+
+Resumen
+- Definí las clases de datos `Surgery`, `Instance`, `PlacedCase` y `Schedule`.
+- Implementé un *decodificador* tipo list-scheduling que transforma una permutación
+  de cirugías en un calendario factible multi-día / multi-quirófano.
+- Implementé la función de `fitness` que combina (espera, horas extra, idle) con
+  normalización y pesos configurables.
+- Agregué un `print_schedule` robusto para inspección y debugging.
+
+Decisiones de diseño (por qué así)
+- Representación compacta: una permutación de ids; el decodificador decide día y sala.
+  Esto me permite reutilizar la misma representación para GA/SA/PSO.
+- Política de factibilidad: siempre construyo un calendario factible.
+  Si el equipo nunca está disponible en el horizonte, coloco el caso al final del último día
+  y contabilizo una penalización suave de "violación".
+- Métricas separadas: `overtime` y `idle` se calculan por (sala, día) para poder auditar.
+
+Complejidad (aprox.)
+- Decodificar N cirugías en Q salas y D días: O(N·Q·D) en el peor caso (recorro candidatos).
+  Me pareció un buen balance entre simplicidad y rendimiento para tamaños de instancia académicos.
+"""
+
+
 # core.py
 from __future__ import annotations
 from dataclasses import dataclass
@@ -14,6 +40,15 @@ class Surgery:
     team: str
     arrival: int = 0
 
+"""
+    Cirugía atómica en el modelo.
+    - sid: identificador entero [0..N-1]
+    - duration: minutos estimados
+    - priority: 'H'/'M'/'L' (las uso en el fitness para ponderar la espera)
+    - team: etiqueta del equipo requerido (p.ej., 'Cardio')
+    - arrival: minuto de arribo dentro del día (0 si el paciente está desde la mañana)
+    """
+
 @dataclass
 class Instance:
     Q: int
@@ -24,6 +59,16 @@ class Instance:
 
     def avail(self, team: str, d: int) -> int:
         return self.team_avail.get((team, d), 0)
+    
+"""
+    Instancia del problema.
+    - Q: quirófanos
+    - D: días del horizonte
+    - H: minutos de jornada por día
+    - surgeries: lista de `Surgery`
+    - team_avail: disponibilidad binaria por (equipo, día)
+    Nota: `avail(team, d)` me devuelve 1/0, y por simplicidad asumo capacidad 1 por equipo.
+    """
 
 @dataclass
 class PlacedCase:
@@ -40,6 +85,15 @@ class Schedule:
     overtime: Dict[Tuple[int,int], int]      # (room,day)
     idle: Dict[Tuple[int,int], int]          # (room,day)
     violations: int
+
+"""
+    Calendario resultante tras decodificar una permutación.
+    - placed: lista de `PlacedCase`
+    - room_day_end[(q,d)]: fin del último caso en esa sala/día
+    - overtime[(q,d)]: minutos más allá de H
+    - idle[(q,d)]: hueco no utilizado dentro de H
+    - violations: conteo de violaciones duras (equipos sin disponibilidad en todo el horizonte)
+"""
 
 # ---------- Decodificador (list scheduling) ----------
 def decode_permutation_to_schedule(inst: Instance, perm: List[int]) -> Schedule:
@@ -99,6 +153,22 @@ def decode_permutation_to_schedule(inst: Instance, perm: List[int]) -> Schedule:
 
     return Schedule(placed=placed, room_day_end=endtime, overtime=overtime, idle=idle, violations=violations)
 
+# Recorro la permutación y para cada cirugía busco el par (día, sala) con
+#     el **inicio factible más temprano** cumpliendo:
+#       - team disponible ese día,
+#       - start >= arrival,
+#       - sin solapes (añado al final de la cola de ese quirófano/día).
+#     Si ningún día tiene el equipo disponible, coloco la cirugía en la cola del
+#     último día (mantengo la secuencia medible) y aumento `violations`.
+
+#     Cálculo de métricas:
+#       - overtime(q,d) = max(0, end_last - H)
+#       - idle(q,d)     = H - trabajo_dentro_de_[0,H] (acotado a [0, H])
+
+#     Razonamiento:
+#       - Prefiero un decodificador simple y determinista para que la calidad se
+#         explique por la permutación (esto ayuda a comparar GA/SA/PSO de forma justa).
+
 # ---------- Fitness (menor es mejor) ----------
 def fitness(inst: Instance, sched: Schedule,
             w_wait=0.5, w_ot=0.3, w_idle=0.2,
@@ -124,6 +194,23 @@ def fitness(inst: Instance, sched: Schedule,
     base = w_wait*Wn + w_ot*On + w_idle*Un
     return base + sched.violations*penalty_per_violation
 
+"""F = w_wait * Wn + w_ot * On + w_idle * Un + penalizaciones
+
+    Donde:
+      - W = sum(alpha[prio_i] * max(0, start_i - arrival_i))
+      - O = sum_{q,d} overtime(q,d)
+      - U = sum_{q,d} idle(q,d)
+
+    Normalización:
+      UB_W = |I| * H, UB_O = |Q|*|D|*H, UB_U = |Q|*|D|*H
+      -> Wn = W/UB_W, On = O/UB_O, Un = U/UB_U
+
+    Decisiones:
+      - La espera se pondera por prioridad (alpha_H > alpha_M > alpha_L).
+      - Añadí una penalización moderada por `violations` para no romper la búsqueda,
+        pero sigo favoreciendo soluciones plenamente factibles.
+    """
+
 # ---------- Utilidades ----------
 def print_schedule(inst: Instance, sched: Schedule, show_empty=True) -> None:
     by_room_day: Dict[Tuple[int,int], List[PlacedCase]] = {}
@@ -145,6 +232,13 @@ def print_schedule(inst: Instance, sched: Schedule, show_empty=True) -> None:
                 s = inst.surgeries[c.sid]
                 print(f"    S{c.sid:02d} ({s.priority}, {s.team}, dur {s.duration}) {c.start}-{c.end}")
     print(f"\nOT total={sum(sched.overtime.values())} | Idle total={sum(sched.idle.values())} | Violaciones={sched.violations}")
+
+"""
+    Impresor de calendario (robusto):
+    - Usa claves (room, day) consistentemente para evitar KeyError.
+    - `.get(..., default)` para salas/días vacíos.
+    - `show_empty=False` oculta quirófanos sin actividad (útil en instancias grandes).
+    """
 
 # Un dataset pequeño para pruebas rápidas
 def make_example_instance() -> Instance:
