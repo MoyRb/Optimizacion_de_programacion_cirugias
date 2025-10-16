@@ -29,6 +29,17 @@ class GAConfig:
     tournament_k: int = 3
     seed: Optional[int] = 42
 
+"""
+    Parámetros del GA y efecto esperado:
+    - pop_size: más grande = más diversidad (más costo).
+    - generations: más generaciones = más refinamiento.
+    - elite_frac: protege buenas soluciones (si es muy alto, reduce diversidad).
+    - cx_prob: probabilidad de crossover (0.7–0.95 suele ir bien).
+    - mut_prob: prob. de mutación (0.2–0.4 en mis pruebas).
+    - tournament_k: presión selectiva (>=2; si sube mucho, converge rápido pero arriesga estancarse).
+    - seed: reproducibilidad.
+    """
+
 def init_population(inst: Instance, pop_size: int, seed: Optional[int]=None) -> List[List[int]]:
     rng = random.Random(seed)
     ids = [s.sid for s in inst.surgeries]
