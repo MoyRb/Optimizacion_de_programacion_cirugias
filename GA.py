@@ -8,12 +8,19 @@ GA.py — Algoritmo Genético (sobre permutaciones)
     * Crossover: OX (Order Crossover), conserva bloques y orden relativo.
     * Mutación: swap + barajar segmento (equilibrio exploración/explotación).
 - Elitismo: conservo la mejor fracción de la población cada generación.
+
+NOVEDAD:
+- Se registran estadísticas de la población por generación (min, Q1, mediana, Q3, max,
+  media y desviación estándar) para poder graficar cuartiles y ver la “forma” de la
+  distribución (no solo el mejor).
 """
 
 from __future__ import annotations
 from dataclasses import dataclass
 from typing import List, Tuple, Dict, Optional
 import random, itertools
+import statistics
+from math import sqrt
 
 from core import Instance, decode_permutation_to_schedule, fitness
 
@@ -94,18 +101,30 @@ def order_crossover_OX(p1: List[int], p2: List[int], rng: Optional[random.Random
             if g not in filled:
                 child[pos] = g
                 pos = (pos + 1) % n
+        # Todos los None han sido reemplazados; listo el hijo
         return [x for x in child if x is not None]
 
     return ox(p1, p2), ox(p2, p1)
 
 
 def mutate(perm: List[int], rng: Optional[random.Random] = None, p_swap: float = 0.7, p_shuffle: float = 0.3):
-    "Mutación: `swap` local + `shuffle` de segmento para sacudir suavemente."
+    """
+    Mutación (in-place) de la permutación:
+    - swap: intercambio de dos posiciones (cambio local) con prob. p_swap.
+    - shuffle: barajar un segmento contiguo (sacudida moderada) con prob. p_shuffle.
+
+    Nota: las dos mutaciones son independientes (pueden ocurrir ambas, una o ninguna).
+    Si quieres que sean excluyentes, cambia el segundo `if` por `elif`.
+    """
     rng = rng or random
     n = len(perm)
+
+    # 1) SWAP con probabilidad p_swap
     if n >= 2 and rng.random() < p_swap:
         i, j = rng.sample(range(n), 2)
         perm[i], perm[j] = perm[j], perm[i]
+
+    # 2) SHUFFLE de un segmento con probabilidad p_shuffle
     if n >= 3 and rng.random() < p_shuffle:
         a, b = sorted(rng.sample(range(n), 2))
         seg = perm[a:b + 1]
@@ -113,11 +132,33 @@ def mutate(perm: List[int], rng: Optional[random.Random] = None, p_swap: float =
         perm[a:b + 1] = seg
 
 
+def _quartiles(values: List[float]):
+    """
+    Devuelve estadísticas robustas de una lista de valores:
+    (min, Q1, mediana, Q3, max, media, desv_estándar_poblacional)
+    Usamos `method='inclusive'` para compatibilidad con tamaños pequeños.
+    """
+    vals = sorted(values)
+    if len(vals) == 1:
+        v = vals[0]
+        return v, v, v, v, v, v, 0.0
+    q1, med, q3 = statistics.quantiles(vals, n=4, method='inclusive')
+    mean = sum(vals) / len(vals)
+    var = sum((x - mean) ** 2 for x in vals) / len(vals)  # varianza poblacional
+    return min(vals), q1, med, q3, max(vals), mean, sqrt(var)
+
+
 def run_ga(inst: Instance, cfg: GAConfig, fitness_kwargs: Optional[Dict] = None):
     """
     Bucle GA con elitismo:
     - Evalúo población → torneo → OX → mutación → elitismo.
-    - Registro mejor fitness por generación (convergencia).
+    - Registro:
+        * history: mejor fitness por generación (para convergencia).
+        * pop_stats: distribución de fitness por generación
+          (min, Q1, mediana, Q3, max, mean, std, y el best histórico).
+
+    IMPORTANTE: La función ahora devuelve 5 valores:
+        best_perm, best_sched, best_fit, history, pop_stats
     """
     rng = random.Random(cfg.seed)
     fitness_kwargs = fitness_kwargs or {}
@@ -127,35 +168,64 @@ def run_ga(inst: Instance, cfg: GAConfig, fitness_kwargs: Optional[Dict] = None)
         sched = decode_permutation_to_schedule(inst, p)
         return fitness(inst, sched, **fitness_kwargs), sched
 
+    # Evaluación inicial
     fits_scheds = [evalp(p) for p in pop]
     fits = [fs[0] for fs in fits_scheds]
+
+    # Mejor actual
     best_i = min(range(len(pop)), key=lambda i: fits[i])
-    best_perm = pop[best_i][:]
-    best_sched = fits_scheds[best_i][1]
-    best_fit = fits[best_i]
-    history = [best_fit]
+    best_perm = pop[best_i][:]                # mejor permutación encontrada
+    best_sched = fits_scheds[best_i][1]       # su calendario
+    best_fit = fits[best_i]                   # su fitness
+    history = [best_fit]                      # traza del mejor histórico
+
+    # Estadísticas generación 0
+    mn, q1, med, q3, mx, mean, std = _quartiles(fits)
+    pop_stats = [{
+        "gen": 0, "min": mn, "q1": q1, "median": med, "q3": q3,
+        "max": mx, "mean": mean, "std": std, "best": best_fit
+    }]
+
     elite = max(1, int(cfg.elite_frac * cfg.pop_size))
 
-    for _ in range(cfg.generations):
+    # Bucle evolutivo
+    for g in range(1, cfg.generations + 1):
+        # Elitismo + reproducción
         ranked = sorted(zip(pop, fits_scheds), key=lambda pf: pf[1][0])
         new_pop = [p[:] for p, _ in ranked[:elite]]
+
         while len(new_pop) < cfg.pop_size:
             p1 = tournament_selection(pop, fits, cfg.tournament_k, rng)
             p2 = tournament_selection(pop, fits, cfg.tournament_k, rng)
+
+            # Crossover y mutación
             c1, c2 = (order_crossover_OX(p1, p2, rng) if rng.random() < cfg.cx_prob else (p1[:], p2[:]))
             if rng.random() < cfg.mut_prob:
                 mutate(c1, rng)
             if rng.random() < cfg.mut_prob:
                 mutate(c2, rng)
+
             new_pop.append(c1)
             if len(new_pop) < cfg.pop_size:
                 new_pop.append(c2)
+
+        # Nueva generación evaluada
         pop = new_pop
         fits_scheds = [evalp(p) for p in pop]
         fits = [fs[0] for fs in fits_scheds]
+
+        # Actualizar mejor histórico (convergencia)
         i = min(range(len(pop)), key=lambda k: fits[k])
         if fits[i] < best_fit:
             best_fit, best_perm, best_sched = fits[i], pop[i][:], fits_scheds[i][1]
         history.append(best_fit)
 
-    return best_perm, best_sched, best_fit, history
+        # Guardar cuartiles y demás estadísticas de esta generación
+        mn, q1, med, q3, mx, mean, std = _quartiles(fits)
+        pop_stats.append({
+            "gen": g, "min": mn, "q1": q1, "median": med, "q3": q3,
+            "max": mx, "mean": mean, "std": std, "best": best_fit
+        })
+
+    # >>> Ahora devolvemos también `pop_stats` para graficar cuartiles <<<
+    return best_perm, best_sched, best_fit, history, pop_stats
