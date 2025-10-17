@@ -5,7 +5,7 @@ import json
 from io import BytesIO
 import pandas as pd
 import streamlit as st
-import altair as alt  # <<< NUEVO
+import altair as alt
 
 from core import Instance, Surgery, decode_permutation_to_schedule, fitness
 from GA import GAConfig, run_ga
@@ -230,7 +230,7 @@ def export_results_to_excel(inst, results_dict, fit_kwargs) -> bytes:
                 writer, sheet_name=f"Calendario_{algo}", index=False, startrow=len(d["schedule_df"]) + 2
             )
             pd.DataFrame({"best": d["history"]}).to_excel(writer, sheet_name=f"Hist_{algo}", index=False)
-            # <<< NUEVO: cuartiles de GA si existen
+            # Cuartiles del GA (si existen)
             if algo == "GA" and "quartiles" in d:
                 d["quartiles"].to_excel(writer, sheet_name=f"Quartiles_{algo}", index=False)
 
@@ -265,13 +265,13 @@ if run:
                        elite_frac=float(elite_frac), cx_prob=float(cx_prob),
                        mut_prob=float(mut_prob), tournament_k=int(tournament_k),
                        seed=int(seed))
-        # <<< NUEVO: ahora run_ga devuelve 5 valores (incluye ga_stats)
+        # GA devuelve 5 valores (incluye estadísticos por generación)
         best_perm, best_sched, best_fit, history, ga_stats = run_ga(inst, cfg, fitness_kwargs=fit_kwargs)
     elif algo == "SA":
         cfg = SAConfig(t0=float(t0), alpha=float(alpha), tmin=float(tmin),
                        iters_per_T=int(iters_per_T), seed=int(seed), p_move=float(p_move))
         best_perm, best_sched, best_fit, history = run_sa(inst, cfg, fitness_kwargs=fit_kwargs, start_perm=None)
-        ga_stats = None  # para uso condicional más abajo
+        ga_stats = None
     else:
         cfg = PSOConfig(swarm_size=int(swarm_size), iterations=int(iterations),
                         w_inertia=float(w_inertia), c_cog=float(c_cog), c_soc=float(c_soc), seed=int(seed))
@@ -295,48 +295,87 @@ if run:
     st.subheader("Convergencia")
     st.line_chart(pd.DataFrame({"best": history}), height=250)
 
-    # <<< NUEVO: Distribución por generación (solo GA)
+    # DISTRIBUCIÓN (solo GA) con leyenda + tooltips (ahora sí, ya existe ga_stats)
     if algo == "GA" and ga_stats:
         st.subheader("Distribución del fitness por generación (GA)")
         stats_df = pd.DataFrame(ga_stats)  # gen,min,q1,median,q3,max,mean,std,best
+
         area_iqr = alt.Chart(stats_df).mark_area(opacity=0.25).encode(
             x=alt.X('gen:Q', title='Generación'),
             y=alt.Y('q1:Q', title='Fitness'),
             y2='q3:Q'
         )
-        line_median = alt.Chart(stats_df).mark_line().encode(x='gen:Q', y='median:Q', color=alt.value('#000'))
-        line_best   = alt.Chart(stats_df).mark_line().encode(x='gen:Q', y='best:Q',   color=alt.value('#2ca02c'))
-        line_min    = alt.Chart(stats_df).mark_line(strokeDash=[3,3]).encode(x='gen:Q', y='min:Q', color=alt.value('#888'))
-        line_max    = alt.Chart(stats_df).mark_line(strokeDash=[3,3]).encode(x='gen:Q', y='max:Q', color=alt.value('#888'))
-        st.altair_chart((area_iqr + line_median + line_best + line_min + line_max).properties(height=260),
-                        use_container_width=True)
+
+        line_data = stats_df[['gen', 'median', 'best', 'min', 'max']].melt(
+            'gen', var_name='Serie', value_name='Fitness'
+        )
+
+        color_scale = alt.Scale(
+            domain=['best', 'median', 'min', 'max'],
+            range=['#2ca02c', '#000000', '#888888', '#888888']
+        )
+
+        line_chart = alt.Chart(line_data).mark_line().encode(
+            x='gen:Q',
+            y='Fitness:Q',
+            color=alt.Color('Serie:N', title='Serie', scale=color_scale),
+            tooltip=[
+                alt.Tooltip('gen:Q', title='Generación'),
+                alt.Tooltip('Serie:N', title='Serie'),
+                alt.Tooltip('Fitness:Q', title='Fitness', format='.5f')
+            ]
+        )
+
+        points = alt.Chart(line_data).mark_circle(size=30, opacity=0.6).encode(
+            x='gen:Q',
+            y='Fitness:Q',
+            color=alt.Color('Serie:N', scale=color_scale, legend=None),
+            tooltip=[
+                alt.Tooltip('gen:Q', title='Generación'),
+                alt.Tooltip('Serie:N', title='Serie'),
+                alt.Tooltip('Fitness:Q', title='Fitness', format='.5f')
+            ]
+        )
+
+        st.altair_chart(
+            (area_iqr + line_chart + points).properties(height=280),
+            use_container_width=True
+        )
+
+        st.markdown("""
+**Cómo leer la gráfica (GA):**
+- **Verde (best)**: mejor **histórico** hasta cada generación.
+- **Negro (median)**: **mediana** de la población en esa generación.
+- **Gris inferior (min)**: mejor individuo **de esa generación**.
+- **Gris superior (max)**: peor individuo **de esa generación**.
+- **Banda sombreada**: rango **Q1–Q3** (50% central de la población).
+
+**Recuerda:** fitness más **bajo** es **mejor**.  
+Banda **ancha** = **diversidad**; banda **estrecha** = **convergencia**.
+Si el **min** no toca el **best**, el mejor histórico no está en esa cohorte.
+""")
 
 # Ejecutar TODOS + Excel
 if run_all:
-    # Configs razonables para comparar rápidamente
     cfg_ga  = GAConfig(pop_size=60, generations=120, elite_frac=0.15, cx_prob=0.9, mut_prob=0.3, tournament_k=3, seed=int(seed))
     cfg_sa  = SAConfig(t0=0.1, alpha=0.95, tmin=1e-4, iters_per_T=250, seed=int(seed)+1, p_move=0.35)
     cfg_pso = PSOConfig(swarm_size=40, iterations=150, w_inertia=0.7, c_cog=1.4, c_soc=1.4, seed=int(seed)+2)
 
-    # GA (ahora con stats)
     ga_perm, ga_sched, ga_fit, ga_hist, ga_stats = run_ga(inst, cfg_ga, fitness_kwargs=fit_kwargs)
     ga_kpi = pd.DataFrame([kpis_from_schedule(inst, ga_sched, alpha_H, alpha_M, alpha_L)])
     ga_cal = pd.DataFrame([{"sid": c.sid, "day": c.day, "room": c.room, "start": c.start, "end": c.end}
                            for c in ga_sched.placed]).sort_values(["day","room","start"]).reset_index(drop=True)
 
-    # SA (arranca desde GA)
     sa_perm, sa_sched, sa_fit, sa_hist = run_sa(inst, cfg_sa, fitness_kwargs=fit_kwargs, start_perm=ga_perm)
     sa_kpi = pd.DataFrame([kpis_from_schedule(inst, sa_sched, alpha_H, alpha_M, alpha_L)])
     sa_cal = pd.DataFrame([{"sid": c.sid, "day": c.day, "room": c.room, "start": c.start, "end": c.end}
                            for c in sa_sched.placed]).sort_values(["day","room","start"]).reset_index(drop=True)
 
-    # PSO
     pso_perm, pso_sched, pso_fit, pso_hist = run_pso(inst, cfg_pso, fitness_kwargs=fit_kwargs)
     pso_kpi = pd.DataFrame([kpis_from_schedule(inst, pso_sched, alpha_H, alpha_M, alpha_L)])
     pso_cal = pd.DataFrame([{"sid": c.sid, "day": c.day, "room": c.room, "start": c.start, "end": c.end}
                            for c in pso_sched.placed]).sort_values(["day","room","start"]).reset_index(drop=True)
 
-    # Mostrar gráficos simples en la UI
     st.success("Comparación completada")
     st.subheader("KPIs por algoritmo")
     resumen = pd.DataFrame([
@@ -353,10 +392,10 @@ if run_all:
     conv_df["PSO"] = [pso_hist[i] if i<len(pso_hist) else None for i in range(len(conv_df))]
     st.line_chart(conv_df.set_index("Iter"))
 
-    # Exportar Excel (incluye hoja de cuartiles del GA)
+    # Exportar Excel (incluye cuartiles del GA)
     results_dict = {
         "GA":  {"schedule_df": ga_cal,  "kpi_df": ga_kpi,  "history": ga_hist,  "fitness": ga_fit,
-                "quartiles": pd.DataFrame(ga_stats)},  # <<< NUEVO
+                "quartiles": pd.DataFrame(ga_stats)},
         "SA":  {"schedule_df": sa_cal,  "kpi_df": sa_kpi,  "history": sa_hist,  "fitness": sa_fit},
         "PSO": {"schedule_df": pso_cal, "kpi_df": pso_kpi, "history": pso_hist, "fitness": pso_fit},
     }
